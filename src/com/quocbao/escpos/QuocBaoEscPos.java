@@ -16,8 +16,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 @DesignerComponent(
-    version = 1,
-    description = "Convert a PNG/JPG receipt image to ESC/POS raster byte chunks for 58mm Bluetooth thermal printers.",
+    version = 2,
+    description = "Convert PNG/JPG receipt images to ESC/POS raster byte chunks for 58mm Bluetooth thermal printers.",
     category = ComponentCategory.EXTENSION,
     nonVisible = true,
     iconName = "")
@@ -28,7 +28,7 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
     super(container.$form());
   }
 
-  @SimpleFunction(description = "Convert an image file to ESC/POS GS v 0 raster chunks. Use width 384 for most 58mm printers, chunkHeight 128, threshold 180. Send each returned sub-list with BluetoothClient.SendBytes.")
+  @SimpleFunction(description = "Convert an image file to ESC/POS GS v 0 raster chunks. Recommended: width 384, chunkHeight 24, threshold 180.")
   public YailList ImageToChunks(String imagePath, int printerWidth, int chunkHeight, int threshold) {
     List<Object> chunks = new ArrayList<Object>();
 
@@ -42,18 +42,9 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
       return YailList.makeList(chunks);
     }
 
-    if (printerWidth <= 0) {
-      printerWidth = 384;
-    }
-    if (chunkHeight <= 0) {
-      chunkHeight = 128;
-    }
-    if (threshold < 0) {
-      threshold = 0;
-    }
-    if (threshold > 255) {
-      threshold = 255;
-    }
+    if (printerWidth <= 0) printerWidth = 384;
+    if (chunkHeight <= 0) chunkHeight = 24;
+    threshold = clampThreshold(threshold);
 
     int srcW = source.getWidth();
     int srcH = source.getHeight();
@@ -73,7 +64,6 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
       int rows = Math.min(chunkHeight, dstH - startY);
       ArrayList<Object> bytes = new ArrayList<Object>();
 
-      // Initialize printer once before the first raster chunk.
       if (startY == 0) {
         bytes.add(27); // ESC
         bytes.add(64); // @
@@ -94,24 +84,8 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
           int value = 0;
           for (int bit = 0; bit < 8; bit++) {
             int x = xb * 8 + bit;
-            if (x < dstW) {
-              int pixel = bitmap.getPixel(x, y);
-              int alpha = Color.alpha(pixel);
-              int r = Color.red(pixel);
-              int g = Color.green(pixel);
-              int b = Color.blue(pixel);
-
-              // Blend transparent pixels onto white.
-              if (alpha < 255) {
-                r = (r * alpha + 255 * (255 - alpha)) / 255;
-                g = (g * alpha + 255 * (255 - alpha)) / 255;
-                b = (b * alpha + 255 * (255 - alpha)) / 255;
-              }
-
-              int luminance = (299 * r + 587 * g + 114 * b) / 1000;
-              if (luminance < threshold) {
-                value |= (1 << (7 - bit));
-              }
+            if (x < dstW && isDark(bitmap.getPixel(x, y), threshold)) {
+              value |= (1 << (7 - bit));
             }
           }
           bytes.add(value);
@@ -121,16 +95,9 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
       chunks.add(YailList.makeList(bytes));
     }
 
-    // Feed paper after printing.
-    ArrayList<Object> feed = new ArrayList<Object>();
-    feed.add(10);
-    feed.add(10);
-    feed.add(10);
-    chunks.add(YailList.makeList(feed));
+    chunks.add(feedChunk());
 
-    if (bitmap != source) {
-      bitmap.recycle();
-    }
+    if (bitmap != source) bitmap.recycle();
     source.recycle();
 
     return YailList.makeList(chunks);
@@ -138,15 +105,95 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
 
   @SimpleFunction(description = "Returns true if the image can be decoded from the supplied file path.")
   public boolean CanReadImage(String imagePath) {
-    if (imagePath == null || imagePath.length() == 0) {
-      return false;
-    }
+    if (imagePath == null || imagePath.length() == 0) return false;
     Bitmap bitmap = BitmapFactory.decodeFile(normalizePath(imagePath));
-    if (bitmap == null) {
-      return false;
-    }
+    if (bitmap == null) return false;
     bitmap.recycle();
     return true;
+  }
+
+  @SimpleFunction(description = "Analyze the saved image without printing. Returns width, height and number of dark pixels. If dark=0 the saved image is blank/white.")
+  public String ImageStats(String imagePath, int threshold) {
+    if (imagePath == null || imagePath.length() == 0) return "ERROR: empty path";
+    Bitmap bitmap = BitmapFactory.decodeFile(normalizePath(imagePath));
+    if (bitmap == null) return "ERROR: cannot decode image";
+
+    threshold = clampThreshold(threshold);
+    int w = bitmap.getWidth();
+    int h = bitmap.getHeight();
+    long dark = 0;
+
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        if (isDark(bitmap.getPixel(x, y), threshold)) dark++;
+      }
+    }
+
+    long total = (long) w * (long) h;
+    bitmap.recycle();
+    return w + "x" + h + " | dark=" + dark + " | total=" + total;
+  }
+
+  @SimpleFunction(description = "Create a tiny ESC/POS raster test: a solid black horizontal bar. Use this to verify whether the printer supports GS v 0 without using an image file.")
+  public YailList BlackBarTestChunks(int printerWidth, int rows) {
+    List<Object> chunks = new ArrayList<Object>();
+    if (printerWidth <= 0) printerWidth = 384;
+    if (rows <= 0) rows = 8;
+    if (rows > 64) rows = 64;
+
+    int widthBytes = (printerWidth + 7) / 8;
+    ArrayList<Object> bytes = new ArrayList<Object>();
+
+    bytes.add(27); // ESC
+    bytes.add(64); // @
+    bytes.add(29);
+    bytes.add(118);
+    bytes.add(48);
+    bytes.add(0);
+    bytes.add(widthBytes & 0xFF);
+    bytes.add((widthBytes >> 8) & 0xFF);
+    bytes.add(rows & 0xFF);
+    bytes.add((rows >> 8) & 0xFF);
+
+    for (int y = 0; y < rows; y++) {
+      for (int xb = 0; xb < widthBytes; xb++) {
+        bytes.add(255);
+      }
+    }
+
+    chunks.add(YailList.makeList(bytes));
+    chunks.add(feedChunk());
+    return YailList.makeList(chunks);
+  }
+
+  private ArrayList<Object> feedChunk() {
+    ArrayList<Object> feed = new ArrayList<Object>();
+    feed.add(10);
+    feed.add(10);
+    feed.add(10);
+    return feed;
+  }
+
+  private int clampThreshold(int threshold) {
+    if (threshold < 0) return 0;
+    if (threshold > 255) return 255;
+    return threshold;
+  }
+
+  private boolean isDark(int pixel, int threshold) {
+    int alpha = Color.alpha(pixel);
+    int r = Color.red(pixel);
+    int g = Color.green(pixel);
+    int b = Color.blue(pixel);
+
+    if (alpha < 255) {
+      r = (r * alpha + 255 * (255 - alpha)) / 255;
+      g = (g * alpha + 255 * (255 - alpha)) / 255;
+      b = (b * alpha + 255 * (255 - alpha)) / 255;
+    }
+
+    int luminance = (299 * r + 587 * g + 114 * b) / 1000;
+    return luminance < threshold;
   }
 
   private String normalizePath(String imagePath) {
