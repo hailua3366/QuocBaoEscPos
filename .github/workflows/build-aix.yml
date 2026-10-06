@@ -1,0 +1,47 @@
+name: Build AIX
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "src/**"
+      - ".github/workflows/build-aix.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Set up Java 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+
+      - name: Install Ant
+        run: sudo apt-get update && sudo apt-get install -y ant
+
+      - name: Clone MIT App Inventor extension template
+        run: git clone --recursive https://github.com/mit-cml/extension-template.git builder
+
+      - name: Copy extension source
+        run: |
+          rm -rf builder/src/*
+          cp -R src/* builder/src/
+
+      - name: Build extension
+        working-directory: builder
+        run: ant extensions
+
+      - name: Show build output
+        run: find builder/out -maxdepth 2 -type f -print
+
+      - name: Upload AIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuocBaoEscPos-aix
+          path: builder/out/*.aix
+          if-no-files-found: error
