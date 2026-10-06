@@ -16,7 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 @DesignerComponent(
-    version = 2,
+    version = 3,
     description = "Convert PNG/JPG receipt images to ESC/POS raster byte chunks for 58mm Bluetooth thermal printers.",
     category = ComponentCategory.EXTENSION,
     nonVisible = true,
@@ -24,22 +24,24 @@ import java.util.List;
 @SimpleObject(external = true)
 public class QuocBaoEscPos extends AndroidNonvisibleComponent {
 
+  private final ArrayList<YailList> preparedChunks = new ArrayList<YailList>();
+
   public QuocBaoEscPos(ComponentContainer container) {
     super(container.$form());
   }
 
-  @SimpleFunction(description = "Convert an image file to ESC/POS GS v 0 raster chunks. Recommended: width 384, chunkHeight 24, threshold 180.")
-  public YailList ImageToChunks(String imagePath, int printerWidth, int chunkHeight, int threshold) {
-    List<Object> chunks = new ArrayList<Object>();
+  @SimpleFunction(description = "Prepare an image for ESC/POS printing and store flat byte chunks internally. Returns the number of chunks. Recommended: width 384, chunkHeight 24, threshold 180.")
+  public int PrepareImage(String imagePath, int printerWidth, int chunkHeight, int threshold) {
+    preparedChunks.clear();
 
     if (imagePath == null || imagePath.length() == 0) {
-      return YailList.makeList(chunks);
+      return 0;
     }
 
     String path = normalizePath(imagePath);
     Bitmap source = BitmapFactory.decodeFile(path);
     if (source == null) {
-      return YailList.makeList(chunks);
+      return 0;
     }
 
     if (printerWidth <= 0) printerWidth = 384;
@@ -53,6 +55,8 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
 
     Bitmap bitmap = source;
     if (srcW != dstW) {
+      // nearest-neighbor style scaling is emulated by first scaling normally,
+      // then hard-thresholding to 1-bit below; this keeps receipt text crisp.
       bitmap = Bitmap.createScaledBitmap(source, dstW, dstH, true);
     } else {
       dstH = srcH;
@@ -65,19 +69,19 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
       ArrayList<Object> bytes = new ArrayList<Object>();
 
       if (startY == 0) {
-        bytes.add(27); // ESC
-        bytes.add(64); // @
+        bytes.add(Integer.valueOf(27)); // ESC
+        bytes.add(Integer.valueOf(64)); // @
       }
 
       // GS v 0 m xL xH yL yH
-      bytes.add(29);
-      bytes.add(118);
-      bytes.add(48);
-      bytes.add(0);
-      bytes.add(widthBytes & 0xFF);
-      bytes.add((widthBytes >> 8) & 0xFF);
-      bytes.add(rows & 0xFF);
-      bytes.add((rows >> 8) & 0xFF);
+      bytes.add(Integer.valueOf(29));
+      bytes.add(Integer.valueOf(118));
+      bytes.add(Integer.valueOf(48));
+      bytes.add(Integer.valueOf(0));
+      bytes.add(Integer.valueOf(widthBytes & 0xFF));
+      bytes.add(Integer.valueOf((widthBytes >> 8) & 0xFF));
+      bytes.add(Integer.valueOf(rows & 0xFF));
+      bytes.add(Integer.valueOf((rows >> 8) & 0xFF));
 
       for (int y = startY; y < startY + rows; y++) {
         for (int xb = 0; xb < widthBytes; xb++) {
@@ -88,19 +92,51 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
               value |= (1 << (7 - bit));
             }
           }
-          bytes.add(value);
+          bytes.add(Integer.valueOf(value));
         }
       }
 
-      chunks.add(YailList.makeList(bytes));
+      preparedChunks.add(YailList.makeList(bytes));
     }
 
-    chunks.add(feedChunk());
+    ArrayList<Object> feed = new ArrayList<Object>();
+    feed.add(Integer.valueOf(10));
+    feed.add(Integer.valueOf(10));
+    feed.add(Integer.valueOf(10));
+    preparedChunks.add(YailList.makeList(feed));
 
     if (bitmap != source) bitmap.recycle();
     source.recycle();
 
-    return YailList.makeList(chunks);
+    return preparedChunks.size();
+  }
+
+  @SimpleFunction(description = "Return one prepared flat byte chunk. Index starts at 1. Pass this directly to BluetoothClient.SendBytes.")
+  public YailList GetPreparedChunk(int index) {
+    if (index < 1 || index > preparedChunks.size()) {
+      return YailList.makeEmptyList();
+    }
+    return preparedChunks.get(index - 1);
+  }
+
+  @SimpleFunction(description = "Return the number of currently prepared chunks.")
+  public int PreparedChunkCount() {
+    return preparedChunks.size();
+  }
+
+  @SimpleFunction(description = "Clear prepared chunks from memory.")
+  public void ClearPrepared() {
+    preparedChunks.clear();
+  }
+
+  @SimpleFunction(description = "Legacy method. Convert an image file to a nested list of ESC/POS chunks.")
+  public YailList ImageToChunks(String imagePath, int printerWidth, int chunkHeight, int threshold) {
+    int count = PrepareImage(imagePath, printerWidth, chunkHeight, threshold);
+    ArrayList<Object> outer = new ArrayList<Object>();
+    for (int i = 1; i <= count; i++) {
+      outer.add(GetPreparedChunk(i));
+    }
+    return YailList.makeList(outer);
   }
 
   @SimpleFunction(description = "Returns true if the image can be decoded from the supplied file path.")
@@ -134,9 +170,9 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
     return w + "x" + h + " | dark=" + dark + " | total=" + total;
   }
 
-  @SimpleFunction(description = "Create a tiny ESC/POS raster test: a solid black horizontal bar. Use this to verify whether the printer supports GS v 0 without using an image file.")
-  public YailList BlackBarTestChunks(int printerWidth, int rows) {
-    List<Object> chunks = new ArrayList<Object>();
+  @SimpleFunction(description = "Prepare a tiny ESC/POS black-bar test. Returns the number of prepared chunks.")
+  public int PrepareBlackBarTest(int printerWidth, int rows) {
+    preparedChunks.clear();
     if (printerWidth <= 0) printerWidth = 384;
     if (rows <= 0) rows = 8;
     if (rows > 64) rows = 64;
@@ -144,34 +180,32 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
     int widthBytes = (printerWidth + 7) / 8;
     ArrayList<Object> bytes = new ArrayList<Object>();
 
-    bytes.add(27); // ESC
-    bytes.add(64); // @
-    bytes.add(29);
-    bytes.add(118);
-    bytes.add(48);
-    bytes.add(0);
-    bytes.add(widthBytes & 0xFF);
-    bytes.add((widthBytes >> 8) & 0xFF);
-    bytes.add(rows & 0xFF);
-    bytes.add((rows >> 8) & 0xFF);
+    bytes.add(Integer.valueOf(27)); // ESC
+    bytes.add(Integer.valueOf(64)); // @
+    bytes.add(Integer.valueOf(29));
+    bytes.add(Integer.valueOf(118));
+    bytes.add(Integer.valueOf(48));
+    bytes.add(Integer.valueOf(0));
+    bytes.add(Integer.valueOf(widthBytes & 0xFF));
+    bytes.add(Integer.valueOf((widthBytes >> 8) & 0xFF));
+    bytes.add(Integer.valueOf(rows & 0xFF));
+    bytes.add(Integer.valueOf((rows >> 8) & 0xFF));
 
     for (int y = 0; y < rows; y++) {
       for (int xb = 0; xb < widthBytes; xb++) {
-        bytes.add(255);
+        bytes.add(Integer.valueOf(255));
       }
     }
 
-    chunks.add(YailList.makeList(bytes));
-    chunks.add(feedChunk());
-    return YailList.makeList(chunks);
-  }
+    preparedChunks.add(YailList.makeList(bytes));
 
-  private ArrayList<Object> feedChunk() {
     ArrayList<Object> feed = new ArrayList<Object>();
-    feed.add(10);
-    feed.add(10);
-    feed.add(10);
-    return feed;
+    feed.add(Integer.valueOf(10));
+    feed.add(Integer.valueOf(10));
+    feed.add(Integer.valueOf(10));
+    preparedChunks.add(YailList.makeList(feed));
+
+    return preparedChunks.size();
   }
 
   private int clampThreshold(int threshold) {
