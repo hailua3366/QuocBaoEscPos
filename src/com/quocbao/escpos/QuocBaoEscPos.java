@@ -13,10 +13,9 @@ import com.google.appinventor.components.runtime.ComponentContainer;
 import com.google.appinventor.components.runtime.util.YailList;
 
 import java.util.ArrayList;
-import java.util.List;
 
 @DesignerComponent(
-    version = 3,
+    version = 4,
     description = "Convert PNG/JPG receipt images to ESC/POS raster byte chunks for 58mm Bluetooth thermal printers.",
     category = ComponentCategory.EXTENSION,
     nonVisible = true,
@@ -30,19 +29,14 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
     super(container.$form());
   }
 
-  @SimpleFunction(description = "Prepare an image for ESC/POS printing and store flat byte chunks internally. Returns the number of chunks. Recommended: width 384, chunkHeight 24, threshold 180.")
+  @SimpleFunction(description = "Prepare an image for ESC/POS printing. Automatically trims blank space below the last dark pixel. Recommended: width 384, chunkHeight 24, threshold 200.")
   public int PrepareImage(String imagePath, int printerWidth, int chunkHeight, int threshold) {
     preparedChunks.clear();
 
-    if (imagePath == null || imagePath.length() == 0) {
-      return 0;
-    }
+    if (imagePath == null || imagePath.length() == 0) return 0;
 
-    String path = normalizePath(imagePath);
-    Bitmap source = BitmapFactory.decodeFile(path);
-    if (source == null) {
-      return 0;
-    }
+    Bitmap source = BitmapFactory.decodeFile(normalizePath(imagePath));
+    if (source == null) return 0;
 
     if (printerWidth <= 0) printerWidth = 384;
     if (chunkHeight <= 0) chunkHeight = 24;
@@ -55,17 +49,33 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
 
     Bitmap bitmap = source;
     if (srcW != dstW) {
-      // nearest-neighbor style scaling is emulated by first scaling normally,
-      // then hard-thresholding to 1-bit below; this keeps receipt text crisp.
       bitmap = Bitmap.createScaledBitmap(source, dstW, dstH, true);
     } else {
       dstH = srcH;
     }
 
+    // Find the last row containing dark content and keep only a small bottom margin.
+    int lastDarkY = -1;
+    outer:
+    for (int y = dstH - 1; y >= 0; y--) {
+      for (int x = 0; x < dstW; x++) {
+        if (isDark(bitmap.getPixel(x, y), threshold)) {
+          lastDarkY = y;
+          break outer;
+        }
+      }
+    }
+
+    int printHeight = dstH;
+    if (lastDarkY >= 0) {
+      int bottomMargin = 12; // printer dots, keeps just enough paper to tear comfortably
+      printHeight = Math.min(dstH, lastDarkY + 1 + bottomMargin);
+    }
+
     int widthBytes = (dstW + 7) / 8;
 
-    for (int startY = 0; startY < dstH; startY += chunkHeight) {
-      int rows = Math.min(chunkHeight, dstH - startY);
+    for (int startY = 0; startY < printHeight; startY += chunkHeight) {
+      int rows = Math.min(chunkHeight, printHeight - startY);
       ArrayList<Object> bytes = new ArrayList<Object>();
 
       if (startY == 0) {
@@ -99,9 +109,8 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
       preparedChunks.add(YailList.makeList(bytes));
     }
 
+    // Only one line feed after the image to minimize blank paper.
     ArrayList<Object> feed = new ArrayList<Object>();
-    feed.add(Integer.valueOf(10));
-    feed.add(Integer.valueOf(10));
     feed.add(Integer.valueOf(10));
     preparedChunks.add(YailList.makeList(feed));
 
@@ -148,7 +157,7 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
     return true;
   }
 
-  @SimpleFunction(description = "Analyze the saved image without printing. Returns width, height and number of dark pixels. If dark=0 the saved image is blank/white.")
+  @SimpleFunction(description = "Analyze the saved image without printing. Returns width, height and number of dark pixels.")
   public String ImageStats(String imagePath, int threshold) {
     if (imagePath == null || imagePath.length() == 0) return "ERROR: empty path";
     Bitmap bitmap = BitmapFactory.decodeFile(normalizePath(imagePath));
@@ -180,8 +189,8 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
     int widthBytes = (printerWidth + 7) / 8;
     ArrayList<Object> bytes = new ArrayList<Object>();
 
-    bytes.add(Integer.valueOf(27)); // ESC
-    bytes.add(Integer.valueOf(64)); // @
+    bytes.add(Integer.valueOf(27));
+    bytes.add(Integer.valueOf(64));
     bytes.add(Integer.valueOf(29));
     bytes.add(Integer.valueOf(118));
     bytes.add(Integer.valueOf(48));
@@ -200,8 +209,6 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
     preparedChunks.add(YailList.makeList(bytes));
 
     ArrayList<Object> feed = new ArrayList<Object>();
-    feed.add(Integer.valueOf(10));
-    feed.add(Integer.valueOf(10));
     feed.add(Integer.valueOf(10));
     preparedChunks.add(YailList.makeList(feed));
 
