@@ -15,7 +15,7 @@ import com.google.appinventor.components.runtime.util.YailList;
 import java.util.ArrayList;
 
 @DesignerComponent(
-    version = 4,
+    version = 5,
     description = "Convert PNG/JPG receipt images to ESC/POS raster byte chunks for 58mm Bluetooth thermal printers.",
     category = ComponentCategory.EXTENSION,
     nonVisible = true,
@@ -109,8 +109,13 @@ public class QuocBaoEscPos extends AndroidNonvisibleComponent {
       preparedChunks.add(YailList.makeList(bytes));
     }
 
-    // Only one line feed after the image to minimize blank paper.
+    // Feed enough paper after the last printed row so the final lines
+    // clear the print head / tear edge, while still keeping waste small.
+    // 4 LF is about 12-15 mm on common 58 mm ESC/POS printers.
     ArrayList<Object> feed = new ArrayList<Object>();
+    feed.add(Integer.valueOf(10));
+    feed.add(Integer.valueOf(10));
+    feed.add(Integer.valueOf(10));
     feed.add(Integer.valueOf(10));
     preparedChunks.add(YailList.makeList(feed));
 
